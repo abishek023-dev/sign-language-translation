@@ -5,87 +5,109 @@ import mediapipe as mp
 from models import load_model
 from utils import mediapipe_detection, extract_landmarks, prob_viz
 
-def ensure_input_shape(sequence, target_shape=(30, 150)):
-    """Ensures input matches target shape of (30, 150)"""
+def ensure_input_shape(sequence, target_shape=(20, 150)):
+    """Ensure input matches target shape with efficient padding"""
     sequence = np.array(sequence)
-    
-    # Pad or trim frames
-    if sequence.shape[0] > target_shape[0]:
-        sequence = sequence[:target_shape[0]]
-    elif sequence.shape[0] < target_shape[0]:
-        padding = np.zeros((target_shape[0] - sequence.shape[0], target_shape[1]))
-        sequence = np.concatenate([sequence, padding])
-    
-    # Ensure 150 features
-    if sequence.shape[1] > target_shape[1]:
-        sequence = sequence[:, :target_shape[1]]
-    elif sequence.shape[1] < target_shape[1]:
-        padding = np.zeros((sequence.shape[0], target_shape[1] - sequence.shape[1]))
-        sequence = np.concatenate([sequence, padding], axis=1)
-    
-    return sequence
+    if len(sequence) > target_shape[0]:
+        sequence = sequence[-target_shape[0]:]  # Use most recent frames
+    elif len(sequence) < target_shape[0]:
+        padding = np.zeros((target_shape[0] - len(sequence), target_shape[1]))
+        sequence = np.concatenate([padding, sequence])
+    return sequence[:, :target_shape[1]]  # Trim features if needed
 
 def main():
     # Configuration
     MODEL_NAME = 'lstm_v3'
     DATA_PATH = 'keypoint_data'
-    SEQUENCE_LENGTH = 30
-    THRESHOLD = 0.8
+    SEQUENCE_LENGTH = 20  # Fixed prediction window
+    THRESHOLD = 0.80  # Confidence threshold
     
     # Initialize
     sequence = []
     predictions = []
     actions = sorted(os.listdir(DATA_PATH))
+    last_prediction = None
     
     # Load model
     model = load_model(MODEL_NAME, len(actions), (SEQUENCE_LENGTH, 150))
     if model is None:
-        print("Failed to initialize model")
+        print("Model failed to load")
         return
-    
+
     # Camera setup
     cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
     with mp.solutions.holistic.Holistic(
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.7
     ) as holistic:
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-                
+
             # Process frame
             image, results = mediapipe_detection(frame, holistic)
             landmarks = extract_landmarks(results)
-            sequence.append(landmarks)
             
-            # Make prediction when buffer is full
+            # Always add landmarks (but keep fixed sequence length)
+            if len(sequence) < SEQUENCE_LENGTH:
+                sequence.append(landmarks)
+            else:
+                sequence = sequence[1:] + [landmarks]  # Sliding window
+
+            # Prediction trigger (EXACTLY at 20 frames)
             if len(sequence) == SEQUENCE_LENGTH:
                 try:
                     processed_seq = ensure_input_shape(sequence)
                     res = model.predict(np.expand_dims(processed_seq, axis=0), verbose=0)[0]
-                    sequence = []  # Reset buffer
                     
-                    if np.max(res) > THRESHOLD:
-                        action = actions[np.argmax(res)]
-                        predictions.append(action)
-                        if len(predictions) > 5:
-                            predictions = predictions[-5:]
+                    # Force display when buffer is full (even if low confidence)
+                    max_conf = np.max(res)
+                    action = actions[np.argmax(res)]
+                    last_prediction = f"{action} ({max_conf*100:.0f}%)"
+                    
+                    # Store high-confidence predictions
+                    if max_conf > THRESHOLD:
+                        predictions.append(last_prediction)
+                        if len(predictions) > 3:
+                            predictions = predictions[-3:]
+                
                 except Exception as e:
                     print(f"Prediction error: {e}")
-                    sequence = []
+
+            # Display
+            cv2.putText(image, f"Frames: {len(sequence)}/{SEQUENCE_LENGTH}",
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
-            # Display results
-            image = prob_viz(res, actions, image) if 'res' in locals() else image
-            cv2.putText(image, ' '.join(predictions), 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                       1, (0, 255, 0), 2)
+            # Always show latest prediction (even if low confidence)
+            if last_prediction:
+                color = (0, 255, 0) if np.max(res) > THRESHOLD else (0, 0, 255)
+                cv2.putText(image, last_prediction,
+                           (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            
+            # Show prediction history
+            cv2.putText(image, " | ".join(predictions),
+                       (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Control instructions
+            cv2.putText(image, "ESC to exit | SPACE to reset",
+                       (10, image.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            
             cv2.imshow('ISL Translation', image)
             
-            if cv2.waitKey(10) & 0xFF == ord('q'):
+            # Controls
+            key = cv2.waitKey(10)
+            if key in (27, 13):  # ESC/Enter
                 break
-                
+            elif key == ord(' '):  # SPACE to reset
+                sequence = []
+                predictions = []
+                last_prediction = None
+
     cap.release()
     cv2.destroyAllWindows()
 
