@@ -9,9 +9,38 @@ from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
 import tensorflow as tf
 from scipy import stats
+from PIL import Image, ImageDraw, ImageFont
 
 mp_drawing = mp.solutions.drawing_utils
 mp_holistic = mp.solutions.holistic
+
+
+
+
+def prob_viz(res, actions, input_frame, font_path="NotoSansOriya-Regular.ttf"):
+    # Convert to PIL Image
+    image_pil = Image.fromarray(cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(image_pil)
+
+    # Load Odia-compatible font
+    try:
+        font = ImageFont.truetype(font_path, 24)
+    except:
+        font = ImageFont.load_default()
+
+    # Draw probabilities
+    if res is not None:
+        for num, prob in enumerate(res):
+            text = f"{actions[num]} : {int(prob * 100)}%"
+            draw.text((10, 85 + num * 35), text, font=font, fill=(0, 0, 0))
+    else:
+        for num in range(len(actions)):
+            text = f"{actions[num]} : 0%"
+            draw.text((10, 85 + num * 35), text, font=font, fill=(0, 0, 0))
+
+    # Convert back to OpenCV format
+    return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+
 
 
 def mediapipe_detection(image, model):
@@ -118,21 +147,3 @@ def get_data(train=False, test=True):
     elif train is True or test is False:
         return X_train, y_train
 
-
-def prob_viz(res, actions, input_frame):
-    if res is not None:
-        output_frame = input_frame.copy()
-        for num, prob in enumerate(res):
-            cv2.putText(output_frame, f"{actions[num]} : {int(prob * 100)}% ", (10, 85 + num * 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2,
-                        cv2.LINE_AA)
-        return output_frame
-
-    else:
-        output_frame = input_frame.copy()
-        for num in range(len(actions)):
-            prob = 0
-            cv2.putText(output_frame, f"{actions[num]} : {int(prob * 100)}% ", (10, 85 + num * 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2,
-                        cv2.LINE_AA)
-        return output_frame
