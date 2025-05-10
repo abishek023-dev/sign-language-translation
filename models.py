@@ -1,47 +1,27 @@
-import os
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model as tf_load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras import Input
+import os
 
-def create_model(input_shape, num_classes):
-    """Creates LSTM model with correct input dimensions"""
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=input_shape),
-        Dropout(0.3),
-        LSTM(128, return_sequences=True),
-        Dropout(0.3),
-        LSTM(64),
-        Dropout(0.3),
-        Dense(128, activation='relu'),
-        Dense(num_classes, activation='softmax')
-    ])
+def build_model(input_shape=(30, 165), num_classes=0):
+    model = Sequential()
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(64, return_sequences=True, activation='relu'))
+    model.add(LSTM(128, return_sequences=True, activation='relu'))
+    model.add(LSTM(64, return_sequences=False, activation='relu'))
+    model.add(Dense(64, activation='relu'))
+    model.add(Dense(32, activation='relu'))
+    model.add(Dense(num_classes, activation='softmax'))
+
+    model.compile(optimizer='Adam', loss='categorical_crossentropy', metrics=['categorical_accuracy'])
     return model
 
-def compile_model(model):
-    """Compiles the model with appropriate settings"""
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    return model
-
-def load_model(model_name, num_classes, input_shape):
-    """
-    Loads or creates model with proper error handling
-    """
-    model_path = os.path.join("models", model_name, "model.keras")
-    
+def load_model(model_name, input_shape=(30, 165), num_classes=0):
+    model_path = f"{model_name}.keras"
     if os.path.exists(model_path):
-        try:
-            model = tf_load_model(model_path)
-            print(f"Loaded existing model from {model_path}")
-            return model
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            print("Creating new model instead")
-    
-    # Create new model if loading fails
-    model = create_model(input_shape, num_classes)
-    model = compile_model(model)
-    return model
+        print(f"[INFO] Loaded existing model from {model_path}")
+        return tf.keras.models.load_model(model_path)
+    else:
+        print(f"[INFO] No existing model found. Creating new model...")
+        return build_model(input_shape, num_classes)

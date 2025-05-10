@@ -1,118 +1,91 @@
-import os
 import cv2
 import numpy as np
 import mediapipe as mp
-from PIL import Image, ImageDraw, ImageFont
-from models import load_model
-from utils import mediapipe_detection, extract_landmarks, prob_viz
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from utils import mediapipe_detection, draw_styled_landmarks, landmarks_data, prob_viz  # Assuming these are in a utils.py file
+import os
+# Constants
+keypoint_data_dir = 'keypoint_data'  # Path to the directory containing keypoint data
+actions = sorted(os.listdir(keypoint_data_dir))  # This will list all subdirectories (actions) alphabetically
+print(f"Actions list: {actions}")  # This will print out the actions to verify
+sequence = []
+sentence = []
+threshold = 0.7
 
-def ensure_input_shape(sequence, target_shape=(20, 150)):
-    sequence = np.array(sequence)
-    if len(sequence) > target_shape[0]:
-        sequence = sequence[-target_shape[0]:]
-    elif len(sequence) < target_shape[0]:
-        padding = np.zeros((target_shape[0] - len(sequence), target_shape[1]))
-        sequence = np.concatenate([padding, sequence])
-    return sequence[:, :target_shape[1]]
+# Define the model (Updated to match input data shape)
+def create_model(input_shape, num_classes):
+    model = Sequential()
+    model.add(LSTM(64, return_sequences=True, input_shape=input_shape))  # Adjusted to accept input_shape
+    model.add(Dropout(0.3))
+    model.add(LSTM(128, return_sequences=False))
+    model.add(Dropout(0.3))
+    model.add(Dense(64, activation='relu'))
+    model.add(Dense(num_classes, activation='softmax'))
+    return model
 
-def draw_odia_text(image, text, position, font_size=24, color=(255, 255, 255)):
-    img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img_pil)
-    try:
-        font = ImageFont.truetype("NotoSansOriya-Regular.ttf", font_size)
-    except:
-        font = ImageFont.load_default()
-        print("Warning: Odia font not found, using default font")
-    draw.text(position, text, font=font, fill=color)
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+# Load or create the model
+model = create_model(input_shape=(30, 150), num_classes=len(actions))  # Adjusted to 150 features per frame
+try:
+    model.load_weights('isl_model.keras')  # Load weights from the saved model
+    print("Model weights loaded successfully.")
+except Exception as e:
+    print(f"Error loading model weights: {e}")
 
-def main():
-    MODEL_NAME = 'lstm_v3'
-    DATA_PATH = 'keypoint_data'
-    SEQUENCE_LENGTH = 20
-    THRESHOLD = 0.80
+# Mediapipe setup for hand/pose tracking
+mp_holistic = mp.solutions.holistic
+holistic = mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-    odia_translations = {
-        "Hello": "ନମସ୍କାର",
-        "How are you": "ଆପଣ କେମିତି ଅଛନ୍ତି?",
-        "Alright": "ଭଲ ଅଛି",
-        "Good Morning": "ଶୁଭ ସକାଳ",
-        "Good afternoon": "ଶୁଭ ଅପରାହ୍ନ",
-        "Good evening": "ଶୁଭ ସନ୍ଧ୍ୟା",
-        "Good night": "ଶୁଭରାତ୍ରି",
-        "Thank you": "ଧନ୍ୟବାଦ",
-        "Pleased": "ଆନନ୍ଦିତ"
-    }
+# OpenCV video capture setup
+cap = cv2.VideoCapture(0)
 
-    sequence = []
-    predictions = []
-    actions = sorted([folder.strip() for folder in os.listdir(DATA_PATH)])
-    last_prediction = None
+# Main loop for real-time video processing
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-    model = load_model(MODEL_NAME, len(actions), (SEQUENCE_LENGTH, 150))
-    if model is None:
-        print("Model failed to load")
-        return
+    # Mediapipe detection
+    image, results = mediapipe_detection(frame, holistic)
+    draw_styled_landmarks(image, results)
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Extract keypoints from detected results
+    keypoints = landmarks_data(results)  # Assuming this function returns a 150-dim feature vector for each frame
+    print(f"Keypoints Shape: {np.array(keypoints).shape}")  # Check the keypoints shape to ensure it's (150,)
+    sequence.append(keypoints)
+    sequence = sequence[-30:]  # Keep last 30 frames
 
-    with mp.solutions.holistic.Holistic(min_detection_confidence=0.7, min_tracking_confidence=0.7) as holistic:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    if len(sequence) == 30:
+        # Prepare the data for prediction
+        input_data = np.expand_dims(sequence, axis=0)  # Shape should be (1, 30, 150)
+        print(f"Input Data Shape: {input_data.shape}")  # Check input shape
 
-            image, results = mediapipe_detection(frame, holistic)
-            landmarks = extract_landmarks(results)
+        # Model prediction
+        res = model.predict(input_data)[0]
 
-            if len(sequence) < SEQUENCE_LENGTH:
-                sequence.append(landmarks)
-            else:
-                sequence = sequence[1:] + [landmarks]
+        if res[np.argmax(res)] > threshold:
+            action = actions[np.argmax(res)]
+            if len(sentence) == 0 or action != sentence[-1]:
+                sentence.append(action)
 
-            if len(sequence) == SEQUENCE_LENGTH:
-                try:
-                    processed_seq = ensure_input_shape(sequence)
-                    res = model.predict(np.expand_dims(processed_seq, axis=0), verbose=0)[0]
-                    max_conf = np.max(res)
-                    action = actions[np.argmax(res)]
-                    odia_action = odia_translations.get(action, action)
-                    last_prediction = f"{odia_action} ({max_conf*100:.0f}%)"
+        if len(sentence) > 5:  # Keep the last 5 actions
+            sentence = sentence[-5:]
 
-                    if max_conf > THRESHOLD:
-                        predictions.append(last_prediction)
-                        if len(predictions) > 3:
-                            predictions = predictions[-3:]
-                except Exception as e:
-                    print(f"Prediction error: {e}")
+        # Display the predicted actions on the frame
+        image = prob_viz(res, actions, image)
 
-            image = draw_odia_text(image, f"ଫ୍ରେମ୍: {len(sequence)}/{SEQUENCE_LENGTH}", (10, 20), 22, (255, 255, 0))
+    # Show predicted sentence on the frame
+    cv2.rectangle(image, (0, 0), (640, 40), (245, 117, 16), -1)
+    cv2.putText(image, ' '.join(sentence), (3, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
 
-            if last_prediction:
-                color = (0, 255, 0) if np.max(res) > THRESHOLD else (0, 0, 255)
-                image = draw_odia_text(image, last_prediction, (10, 60), 26, color)
+    # Display the frame
+    cv2.imshow('OpenCV Feed', image)
 
-            if predictions:
-                history_text = " | ".join(predictions)
-                image = draw_odia_text(image, history_text, (10, 100), 20, (0, 255, 255))
+    # Exit the loop if 'q' is pressed
+    if cv2.waitKey(10) & 0xFF == ord('q'):
+        break
 
-            image = draw_odia_text(image, "ESC ଦବାନ୍ତୁ ବାହାରିବାକୁ | SPACE ଦବାନ୍ତୁ ରିସେଟ୍ କରିବାକୁ",
-                                   (10, image.shape[0] - 30), 20, (255, 255, 255))
-
-            cv2.imshow('ISL ଅନୁବାଦକ', image)
-
-            key = cv2.waitKey(10)
-            if key in (27, 13):
-                break
-            elif key == ord(' '):
-                sequence = []
-                predictions = []
-                last_prediction = None
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+# Release the capture and close the window
+cap.release()
+cv2.destroyAllWindows()
